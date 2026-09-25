@@ -55,6 +55,11 @@ namespace DfoServer.Infrastructure
                             walCmd.CommandText = "PRAGMA journal_mode=WAL;";
                             walCmd.ExecuteScalar();
                         }
+                        using (var syncCmd = conn.CreateCommand())
+                        {
+                            syncCmd.CommandText = "PRAGMA synchronous=NORMAL;";
+                            syncCmd.ExecuteNonQuery();
+                        }
                     }
                 }
                 catch
