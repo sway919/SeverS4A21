@@ -393,35 +393,7 @@ namespace DfoServer.GameWorld
             MazeInfo maze,
             int x,
             int y)
-        {
-            if (maze?.MapSpecifications == null)
-                return false;
-
-            foreach (var item in maze.MapSpecifications)
-            {
-                if (item.X != x
-                    || item.Y != y
-                    || (!string.Equals(
-                            item.Type,
-                            "boss",
-                            StringComparison.OrdinalIgnoreCase)
-                        && !string.Equals(
-                            item.Type,
-                            "map",
-                            StringComparison.OrdinalIgnoreCase)))
-                {
-                    continue;
-                }
-
-                if (item.MapCandidates != null
-                    && item.MapCandidates.Length > 1)
-                {
-                    return true;
-                }
-            }
-
-            return false;
-        }
+            => GetExplicitBossCandidateMapIds(maze, x, y).Count > 1;
 
         internal static List<int> GetExplicitBossCandidateMapIds(
             MazeInfo maze,
@@ -433,6 +405,7 @@ namespace DfoServer.GameWorld
             if (maze?.MapSpecifications == null)
                 return result;
 
+            var maplst = DungeonMapCatalog.LoadMapList();
             foreach (var item in maze.MapSpecifications)
             {
                 if (item.X != x
@@ -453,9 +426,18 @@ namespace DfoServer.GameWorld
                     && item.MapCandidates.Length > 0
                         ? item.MapCandidates
                         : new[] { item.Index };
+                var declaredBoss = string.Equals(
+                    item.Type, "boss", StringComparison.OrdinalIgnoreCase);
                 foreach (var mapId in candidates)
                 {
-                    if (mapId > 0 && seen.Add(mapId))
+                    // A random Boss coordinate can also declare ordinary MAP
+                    // variants for the runs where that cell is not the Boss room.
+                    // Only Boss resources belong to the frozen Boss candidate pool.
+                    if (mapId > 0
+                        && (declaredBoss
+                            || ClassifyFileType(mapId, string.Empty) == MapFileType.Boss
+                            || HasBossActor(maplst, mapId))
+                        && seen.Add(mapId))
                         result.Add(mapId);
                 }
             }
@@ -468,16 +450,16 @@ namespace DfoServer.GameWorld
             int x,
             int y)
         {
-            if (!HasExplicitBossCandidatePool(maze, x, y))
+            var candidates = GetExplicitBossCandidateMapIds(maze, x, y);
+            if (candidates.Count < 2)
                 return -1;
 
-            var maplst = DungeonMapCatalog.LoadMapList();
-            return ResolveFromMapSpecification(
-                maplst,
+            return SelectMapSpecificationCandidate(
                 maze,
                 x,
                 y,
-                isBossRoom: true);
+                candidates,
+                allowRandomFallback: true);
         }
 
         internal static bool MapContainsMonsterCode(
@@ -1521,6 +1503,14 @@ namespace DfoServer.GameWorld
             var bestDirectoryPriority = int.MaxValue;
             foreach (var entry in bossPool)
             {
+                // 烈焰格拉卡普通迷宫使用火女 Boss；1246/1247 是牛头护卫和胆小哥布林模板。
+                if (dungeonId == 8
+                    && (maze.QuestConnection == null || maze.QuestConnection.Length < 2)
+                    && entry.MapId is 1246 or 1247)
+                {
+                    continue;
+                }
+
                 if (entry.MapId <= 0
                     || GetMapDungeonOwner(maplst, entry.MapId) != dungeonId
                     || (!string.IsNullOrEmpty(expectedGreed)

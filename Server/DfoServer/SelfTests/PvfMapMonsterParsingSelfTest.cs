@@ -2,6 +2,7 @@ using DfoServer.GameWorld;
 using DfoServer.Game.Quests;
 using DfoServer.Game.Dungeon;
 using DfoServer.Network;
+using DfoServer.Network.Handlers.Dungeon;
 using Microsoft.Data.Sqlite;
 using PvfLib;
 using System;
@@ -25,6 +26,7 @@ namespace DfoServer.SelfTests
             VerifyNpcDummyBossAlignment(ref failures);
             VerifyRealArdenBossMap(ref failures);
             VerifyRealDimensionBossMaps(ref failures);
+            VerifyRandomBossRoomCandidates(ref failures);
             VerifyCrackOfDimensionSelection(ref failures);
             VerifyAnotherAradQuestRuntime(ref failures);
             VerifySceneOwnedTimedMonsterWave(ref failures);
@@ -319,6 +321,84 @@ namespace DfoServer.SelfTests
                     $"real dimension boss-map check failed with exception: {ex.Message}");
                 failures++;
             }
+        }
+
+        private static void VerifyRandomBossRoomCandidates(ref int failures)
+        {
+            if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("PVF_ARCHIVE_PATH")))
+                return;
+
+            foreach (var dungeonId in new[] { 4, 6, 8, 25 })
+            {
+                var maze = Dungeon.GetDungeonMaze(dungeonId, 0);
+                for (var index = 0; index < maze.BossMap.Length; index += 2)
+                {
+                    var boss = new[] { maze.BossMap[index], maze.BossMap[index + 1] };
+                    var selected = SpecialDungeonRunCoordinator.ResolveSelectedBossMapId(
+                        dungeonId, 0, maze, boss, Array.Empty<ActiveQuest>());
+                    var room = Dungeon.GetDungeonMapMonsterSummaryInformation(
+                        dungeonId, boss[0], boss[1], 0, selected, boss);
+                    Check($"dungeon={dungeonId} boss=({boss[0]},{boss[1]}) resolves a blocking Boss actor",
+                        room.Monsters.Any(m => (m.Type == 3 || m.Type == 8) && m.IsBlocking),
+                        ref failures);
+                    Check($"dungeon={dungeonId} ordinary MAP variants remain outside the explicit Boss pool",
+                        !DungeonMapResolver.HasExplicitBossCandidatePool(maze, boss[0], boss[1])
+                        && DungeonMapResolver.GetExplicitBossCandidateMapIds(maze, boss[0], boss[1]).Count == 0,
+                        ref failures);
+
+                    if (dungeonId == 8)
+                    {
+                        var other = index == 0 ? new[] { 4, 2 } : new[] { 3, 1 };
+                        var ordinary = Dungeon.GetDungeonMapMonsterSummaryInformation(
+                            dungeonId, other[0], other[1], 0, -1, boss);
+                        var ordinaryMapIds = index == 0 ? new[] { 1243, 1244 } : new[] { 1223, 1224 };
+                        Check($"Flame GrakKarak boss=({boss[0]},{boss[1]}) keeps the other candidate room ordinary",
+                            ordinaryMapIds.Contains(ordinary.Index)
+                            && ordinary.Monsters.All(m => m.Type != 3 && m.Type != 8), ref failures);
+                        Check($"Flame GrakKarak boss=({boss[0]},{boss[1]}) uses the Pinocchio Boss MAP",
+                            room.Index == (boss[0] == 3 ? 1245 : 1248)
+                            && room.Monsters.Any(m => m.Code == 22 && m.Type == 3 && m.IsBlocking)
+                            && DungeonBossRouteDefinitionProjector.Project(dungeonId, 0, maze, boss) == null,
+                            ref failures);
+                    }
+
+                    if (dungeonId != 25)
+                        continue;
+                    var otherX = boss[0] == 1 ? 2 : 1;
+                    var ordinarySpine = Dungeon.GetDungeonMapMonsterSummaryInformation(
+                        dungeonId, otherX, 2, 0, -1, boss);
+                    Check($"First Spine with boss x={boss[0]} keeps the other candidate room ordinary",
+                        (ordinarySpine.Index == 3815 || ordinarySpine.Index == 3816)
+                        && ordinarySpine.Monsters.All(m => m.Type != 3 && m.Type != 8), ref failures);
+                    Check($"First Spine with boss x={boss[0]} has the blocking octopus Boss",
+                        room.Monsters.Any(m => m.Code == 251 && m.Type == 3 && m.IsBlocking),
+                        ref failures);
+                }
+            }
+
+            foreach (var dungeonId in new[] { 52, 2007, 5006 })
+            {
+                var maze = Dungeon.GetDungeonMaze(dungeonId, 0);
+                var boss = new[] { maze.BossMap[0], maze.BossMap[1] };
+                var candidates = DungeonMapResolver.GetExplicitBossCandidateMapIds(maze, boss[0], boss[1]);
+                var selected = SpecialDungeonRunCoordinator.ResolveSelectedBossMapId(
+                    dungeonId, 0, maze, boss, Array.Empty<ActiveQuest>());
+                Check($"dungeon={dungeonId} retains its authored Boss variant selection",
+                    candidates.Count > 1 && candidates.Contains(selected)
+                    && Dungeon.GetDungeonMapMonsterSummaryInformation(
+                        dungeonId, boss[0], boss[1], 0, selected, boss).Monsters
+                        .Any(m => m.Type == 3 || m.Type == 8), ref failures);
+            }
+
+            var questMaze = Dungeon.GetDungeonMaze(25, 1);
+            var questBoss = DungeonMapResolver.ResolveMapId(25, 1, 2, questMaze, 1, new[] { 1, 2 });
+            Check("First Spine quest maze keeps its explicit Boss MAP", questBoss == 3820, ref failures);
+            var flameQuestBoss = Dungeon.GetDungeonMapMonsterSummaryInformation(
+                8, 2, 0, 1, -1, new[] { 2, 0 });
+            Check("Flame GrakKarak quest maze keeps its explicit Pinocchio Boss MAP",
+                flameQuestBoss.Index == 1249
+                && flameQuestBoss.Monsters.Any(m => m.Code == 62523 && m.Type == 3 && m.IsBlocking),
+                ref failures);
         }
 
         private static void VerifyCrackOfDimensionSelection(ref int failures)
