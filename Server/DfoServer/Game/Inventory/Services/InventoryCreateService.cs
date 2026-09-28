@@ -486,10 +486,24 @@ namespace DfoServer.Game.Inventory
             if (!StackableExpirationPolicyResolver.TryResolve(stackable, out var policy))
                 return 0;
 
+            var expireTime = policy.AbsoluteExpirationUnixTime;
             if (policy.UsablePeriodDays > 0)
-                return PvfExpirationMetadata.AddDaysFromNow(policy.UsablePeriodDays);
+            {
+                var usablePeriodTime = PvfExpirationMetadata.AddDaysFromNow(
+                    policy.UsablePeriodDays);
+                expireTime = expireTime > 0
+                    ? Math.Min(expireTime, usablePeriodTime)
+                    : usablePeriodTime;
+            }
+            if (policy.DeleteAtDailyReset)
+            {
+                var dailyResetTime = PvfExpirationMetadata.NextDailyResetUnixTime(DateTime.UtcNow);
+                expireTime = expireTime > 0
+                    ? Math.Min(expireTime, dailyResetTime)
+                    : dailyResetTime;
+            }
 
-            return policy.AbsoluteExpirationUnixTime;
+            return expireTime;
         }
 
         private static bool TryCreateAndInsertCore(

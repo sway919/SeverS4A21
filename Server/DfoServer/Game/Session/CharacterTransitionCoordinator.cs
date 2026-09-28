@@ -128,6 +128,31 @@ namespace DfoServer.Game.Session
             }
         }
 
+        internal IDisposable Acquire(int characterId)
+        {
+            GateEntry entry;
+            lock (_gatesLock)
+            {
+                if (!_gates.TryGetValue(characterId, out entry))
+                {
+                    entry = new GateEntry();
+                    _gates.Add(characterId, entry);
+                }
+                entry.ReferenceCount++;
+            }
+
+            try
+            {
+                entry.Semaphore.Wait();
+                return new GateLease(this, characterId, entry);
+            }
+            catch
+            {
+                ReleaseReference(characterId, entry);
+                throw;
+            }
+        }
+
         private void Release(int characterId, GateEntry entry)
         {
             entry.Semaphore.Release();

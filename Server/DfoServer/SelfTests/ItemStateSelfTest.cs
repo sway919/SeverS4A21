@@ -1,11 +1,13 @@
 using System;
 using System.IO;
 using DfoServer.Game.Inventory;
+using DfoServer.Game.Session;
 using DfoServer.Game.ItemUpgrade;
 using DfoServer.Game.SelectCharacter;
 using DfoServer.Infrastructure;
 using DfoServer.Network;
 using DfoServer.Network.Builders;
+using DfoServer.Network.Handlers;
 using DfoServer.Sqlite;
 using Microsoft.Data.Sqlite;
 
@@ -22,6 +24,8 @@ namespace DfoServer.SelfTests
             VerifyOnlineCacheAndProjection(ref failures);
             VerifyEpicBuffPotionBuffProjection(ref failures);
             VerifyPvfLifecycleParsing(ref failures);
+            VerifyDailyDeleteItems(ref failures);
+            VerifyDailyDeletePersistence(ref failures);
             VerifyExperienceBonusEffectLookup(ref failures);
             VerifyLifecycleRules(ref failures);
 
@@ -342,6 +346,214 @@ PRAGMA user_version = 6;";
                 && string.Equals(stackable.StatChangeDurationTarget, "myself", StringComparison.Ordinal)
                 && stackable.CoolTime == 10000,
                 ref failures);
+        }
+
+        private static void VerifyDailyDeleteItems(ref int failures)
+        {
+            var beforeResetUtc = new DateTime(2026, 9, 27, 21, 59, 0, DateTimeKind.Utc);
+            var atResetUtc = beforeResetUtc.AddMinutes(1);
+            var deadline = PvfExpirationMetadata.NextDailyResetUnixTime(beforeResetUtc);
+            Check("daily delete deadline is Beijing 06:00",
+                deadline == new DateTimeOffset(atResetUtc).ToUnixTimeSeconds()
+                && PvfExpirationMetadata.NextDailyResetUnixTime(atResetUtc)
+                    == new DateTimeOffset(atResetUtc.AddDays(1)).ToUnixTimeSeconds(),
+                ref failures);
+
+            var inventory = new InventoryService(72006, 72007);
+            var ids = new[] { 10157245, 10157246, 10157247, 10157248 };
+            var allTagged = true;
+            var allCreatedWithDeadline = true;
+            var currentDeadline = PvfExpirationMetadata.NextDailyResetUnixTime(DateTime.UtcNow);
+            for (var index = 0; index < ids.Length; index++)
+            {
+                var id = ids[index];
+                allTagged &= ItemMetadataResolver.TryLoadStackableFile(id, out var stackable)
+                    && StackableExpirationPolicyResolver.TryResolve(stackable, out var policy)
+                    && policy.DeleteAtDailyReset;
+                var core = InventoryCreateService.CreateCore(
+                    ItemCore.KindQuest, id, ItemCreateReason.QuestReward, 1);
+                allCreatedWithDeadline &= core.ExpireTime == currentDeadline;
+                core.ExpireTime = 0;
+                inventory.SetItem(InventoryListType.Main, (short)(20 + index), core);
+            }
+
+            Check("Black Volcano's four PVF materials request daily deletion",
+                allTagged, ref failures);
+            Check("new daily quest materials carry the next reset deadline",
+                allCreatedWithDeadline, ref failures);
+
+            var ordinary = InventoryCreateService.CreateCore(
+                ItemCore.KindQuest, 10093922, ItemCreateReason.QuestReward, 1);
+            inventory.SetItem(InventoryListType.Main, 24, ordinary);
+            var armed = InventoryItemLifecycleService.ArmUnscheduledDailyDeleteItems(
+                inventory, beforeResetUtc);
+            Check("legacy daily materials receive a deadline without touching ordinary materials",
+                armed == 4
+                && inventory.GetItem(InventoryListType.Main, 24)?.ExpireTime == 0
+                && inventory.GetItem(InventoryListType.Main, 20)?.ExpireTime == deadline,
+                ref failures);
+            Check("arming a legacy daily material is idempotent",
+                InventoryItemLifecycleService.ArmUnscheduledDailyDeleteItems(
+                    inventory, beforeResetUtc) == 0,
+                ref failures);
+            Check("daily materials remain before reset",
+                InventoryItemLifecycleService.RemoveExpiredItems(
+                    inventory, deadline - 1, null) == 0,
+                ref failures);
+            Check("daily materials are removed at reset",
+                InventoryItemLifecycleService.RemoveExpiredItems(
+                    inventory, deadline, null) == 4
+                && inventory.GetItem(InventoryListType.Main, 20) == null
+                && inventory.GetItem(InventoryListType.Main, 24)?.ItemId == 10093922,
+                ref failures);
+
+            var first = InventoryCreateService.CreateCore(
+                ItemCore.KindQuest, ids[0], ItemCreateReason.QuestReward, 1);
+            var second = first.Copy();
+            second.ExpireTime++;
+            Check("stacks with different reset deadlines do not merge",
+                !InventoryStackRuleService.CanShareStack(first, second),
+                ref failures);
+        }
+
+        private static void VerifyDailyDeletePersistence(ref int failures)
+        {
+            const int accountId = 72008;
+            const int characterId = 72009;
+            var sessionId = Guid.NewGuid();
+            var path = Path.Combine(Path.GetTempPath(),
+                "s4a21-daily-delete-" + Guid.NewGuid().ToString("N") + ".db");
+            try
+            {
+                var database = new GameDatabase(path, ServerPaths.SchemaFilePath);
+                SeedAccount(database, accountId, "daily-delete-account");
+                SeedCharacter(database, characterId, accountId, "daily-delete-character");
+                using (var connection = database.OpenConnection())
+                {
+                    var inventory = InventoryService.LoadFromDb(
+                        connection, characterId, accountId, database);
+                    var lease = InventoryContext.Register(sessionId, characterId, inventory);
+                    var core = InventoryCreateService.CreateCore(
+                        ItemCore.KindQuest, 10157245, ItemCreateReason.QuestReward, 1);
+                    var deadline = core.ExpireTime;
+                    inventory.SetItem(InventoryListType.Main, 25, core);
+                    Check("daily material deadline persists in the inventory row",
+                        InventoryPersistenceService.SaveDirty(lease)
+                        && InventoryService.LoadFromDb(connection, characterId, accountId, database)
+                            .GetItem(InventoryListType.Main, 25)?.ExpireTime == deadline,
+                        ref failures);
+
+                    database.Write((dbConnection, transaction) =>
+                    {
+                        using var command = dbConnection.CreateCommand();
+                        command.Transaction = transaction;
+                        command.CommandText = @"
+CREATE TRIGGER daily_delete_test_abort BEFORE DELETE ON character_inventory_items
+WHEN OLD.character_id = 72009 BEGIN SELECT RAISE(ABORT, 'daily-delete-test'); END;";
+                        command.ExecuteNonQuery();
+                    });
+                    var changes = new InventoryMutationSet();
+                    var failed = OnlineInventoryMutationCommitCoordinator.TryCommit(
+                        lease, "daily-delete-test-rollback", (_, _) =>
+                        {
+                            InventoryItemLifecycleService.RemoveExpiredItems(
+                                lease.Inventory, deadline, changes);
+                            return true;
+                        });
+                    Check("failed daily deletion restores the persisted material",
+                        !failed
+                        && InventoryService.LoadFromDb(connection, characterId, accountId, database)
+                            .GetItem(InventoryListType.Main, 25)?.ItemId == 10157245
+                        && InventoryContext.TryGetLease(characterId, out var restored)
+                        && restored.IsOwnedBy(sessionId)
+                        && restored.Inventory.GetItem(InventoryListType.Main, 25)?.ItemId == 10157245,
+                        ref failures);
+
+                    database.Write((dbConnection, transaction) =>
+                    {
+                        using var command = dbConnection.CreateCommand();
+                        command.Transaction = transaction;
+                        command.CommandText = "DROP TRIGGER daily_delete_test_abort;";
+                        command.ExecuteNonQuery();
+                    });
+                    InventoryContext.TryGetLease(characterId, out var current);
+                    var committed = OnlineInventoryMutationCommitCoordinator.TryCommit(
+                        current, "daily-delete-test", (_, _) =>
+                        {
+                            InventoryItemLifecycleService.RemoveExpiredItems(
+                                current.Inventory, deadline, null);
+                            return true;
+                        });
+                    Check("committed daily deletion survives inventory reload",
+                        committed
+                        && current.Inventory.GetItem(InventoryListType.Main, 25) == null
+                        && InventoryService.LoadFromDb(connection, characterId, accountId, database)
+                            .GetItem(InventoryListType.Main, 25) == null,
+                        ref failures);
+
+                    var legacy = InventoryCreateService.CreateCore(
+                        ItemCore.KindQuest, 10157245, ItemCreateReason.QuestReward, 1);
+                    legacy.ExpireTime = 0;
+                    current.Inventory.SetItem(InventoryListType.Main, 25, legacy);
+                    Check("legacy daily material starts without a persisted deadline",
+                        InventoryPersistenceService.SaveDirty(current), ref failures);
+                    database.Write((dbConnection, transaction) =>
+                    {
+                        using var command = dbConnection.CreateCommand();
+                        command.Transaction = transaction;
+                        command.CommandText = @"
+CREATE TRIGGER daily_delete_login_abort BEFORE UPDATE ON character_inventory_items
+WHEN OLD.character_id = 72009 BEGIN SELECT RAISE(ABORT, 'daily-delete-login-test'); END;";
+                        command.ExecuteNonQuery();
+                    });
+                    var loginFailed = !CharacterSelectHandler
+                        .ApplyLoginItemExpirationMaintenance(current);
+                    Check("failed login arming restores the original inventory row",
+                        loginFailed
+                        && current.Inventory.GetItem(InventoryListType.Main, 25)?.ExpireTime == 0
+                        && InventoryService.LoadFromDb(connection, characterId, accountId, database)
+                            .GetItem(InventoryListType.Main, 25)?.ExpireTime == 0,
+                        ref failures);
+                    database.Write((dbConnection, transaction) =>
+                    {
+                        using var command = dbConnection.CreateCommand();
+                        command.Transaction = transaction;
+                        command.CommandText = "DROP TRIGGER daily_delete_login_abort;";
+                        command.ExecuteNonQuery();
+                    });
+                    Check("retrying login arming persists the deadline",
+                        CharacterSelectHandler.ApplyLoginItemExpirationMaintenance(current)
+                        && current.Inventory.GetItem(InventoryListType.Main, 25)?.ExpireTime > 0
+                        && InventoryService.LoadFromDb(connection, characterId, accountId, database)
+                            .GetItem(InventoryListType.Main, 25)?.ExpireTime
+                            == current.Inventory.GetItem(InventoryListType.Main, 25)?.ExpireTime,
+                        ref failures);
+
+                    var staleSession = new EnhancedClientSession(null, new GamePacketHeader());
+                    staleSession.Player.CharacterId = characterId;
+                    var sessions = new SessionDirectory();
+                    sessions.Register(characterId, staleSession);
+                    current.Inventory.GetItem(InventoryListType.Main, 25).ExpireTime = 1;
+                    current.Inventory.MarkDirty(InventoryListType.Main, 25);
+                    Check("expired material prepared for stale-session callback",
+                        InventoryPersistenceService.SaveDirty(current), ref failures);
+                    DailyDeleteItemMaintenance.Run(
+                        sessions, new CharacterTransitionCoordinator(sessions));
+                    Check("daily callback cannot mutate another session's lease",
+                        current.Inventory.GetItem(InventoryListType.Main, 25)?.ItemId == 10157245
+                        && InventoryService.LoadFromDb(connection, characterId, accountId, database)
+                            .GetItem(InventoryListType.Main, 25)?.ItemId == 10157245,
+                        ref failures);
+                }
+            }
+            finally
+            {
+                InventoryContext.Unregister(sessionId, characterId);
+                SqliteConnection.ClearAllPools();
+                TryDelete(path);
+                TryDelete(path + "-wal");
+                TryDelete(path + "-shm");
+            }
         }
 
         private static void VerifyExperienceBonusEffectLookup(ref int failures)

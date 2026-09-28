@@ -169,6 +169,9 @@ namespace DfoServer.Game.Inventory
                     var comparable = core.Copy(); comparable.Count = 1;
                     foreach (var existing in inventory.GetItems(InventoryListType.Main))
                     {
+                        if (existing.Value?.ItemId == core.ItemId
+                            && existing.Value.ExpireTime != core.ExpireTime)
+                            return false;
                         if (!InventoryStackRuleService.CanShareStack(core, existing.Value)) continue;
                         var other = existing.Value.Copy(); other.Count = 1;
                         if (!comparable.ToBytes().SequenceEqual(other.ToBytes())) return false;

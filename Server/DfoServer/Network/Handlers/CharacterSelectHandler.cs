@@ -234,34 +234,49 @@ namespace DfoServer.Network.Handlers
             }
         }
 
-        private void ApplyLoginItemExpirationMaintenance(InventoryLease lease)
+        internal static bool ApplyLoginItemExpirationMaintenance(InventoryLease lease)
         {
             if (lease?.Inventory == null)
-                return;
+                return false;
 
             int removedItems;
+            int armedItems;
             lock (lease.SyncRoot)
             {
+                armedItems = InventoryItemLifecycleService.ArmUnscheduledDailyDeleteItems(
+                    lease.Inventory, DateTime.UtcNow);
                 removedItems = InventoryItemLifecycleService.RemoveExpiredItems(
                     lease.Inventory,
                     InventoryItemLifecycleService.UtcNowUnixSeconds(),
                     null);
             }
 
-            if (removedItems <= 0)
-                return;
+            if (removedItems <= 0 && armedItems <= 0)
+                return true;
 
             if (!InventoryPersistenceService.SaveDirty(lease))
             {
                 FileLogger.Log(
-                    $"[{ProtocolName}] expired item cleanup persistence failed " +
-                    $"cid={lease.CharacterId} removed={removedItems}");
-                return;
+                    "[GameProtocol] expired item cleanup persistence failed " +
+                    $"cid={lease.CharacterId} removed={removedItems} armed={armedItems}");
+                try
+                {
+                    InventoryRollbackRecoveryService.ReloadOnlineInventory(
+                        lease.Inventory.Database?.ConnectionString, lease);
+                }
+                catch (Exception ex)
+                {
+                    FileLogger.Log(
+                        "[GameProtocol] expired item cleanup reload failed " +
+                        $"cid={lease.CharacterId}: {ex.Message}");
+                }
+                return false;
             }
 
             FileLogger.Log(
-                $"[{ProtocolName}] expired item cleanup applied " +
-                $"cid={lease.CharacterId} removed={removedItems}");
+                "[GameProtocol] expired item cleanup applied " +
+                $"cid={lease.CharacterId} removed={removedItems} armed={armedItems}");
+            return true;
         }
 
         private bool TryApplyAccountDailyReset(int accountId)
@@ -325,6 +340,7 @@ namespace DfoServer.Network.Handlers
             int slot)
         {
             GameChannelSpawn selectedSpawn = null;
+            var expirationMaintenanceFailed = false;
             try
             {
                 // 换角色前丢弃上一个角色的副本局: PlayerContext 实例跨角色复用, 不丢会把
@@ -374,7 +390,12 @@ namespace DfoServer.Network.Handlers
                         record,
                         selectedSpawn);
                     var registeredLease = TryRegisterInventoryLease(session, record, inventory);
-                    ApplyLoginItemExpirationMaintenance(registeredLease);
+                    if (!ApplyLoginItemExpirationMaintenance(registeredLease))
+                    {
+                        expirationMaintenanceFailed = true;
+                        throw new InvalidOperationException(
+                            "login item expiration maintenance was not committed");
+                    }
 
                     try
                     {
@@ -441,6 +462,8 @@ namespace DfoServer.Network.Handlers
             }
             catch (Exception ex)
             {
+                if (expirationMaintenanceFailed)
+                    throw;
                 FileLogger.Log($"[{ProtocolName}] Select character DB load failed: {ex.Message}");
             }
 

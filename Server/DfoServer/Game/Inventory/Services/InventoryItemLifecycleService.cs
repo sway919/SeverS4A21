@@ -395,6 +395,53 @@ namespace DfoServer.Game.Inventory
             return removed;
         }
 
+        internal static int ArmUnscheduledDailyDeleteItems(
+            InventoryService inventory,
+            DateTime utcNow)
+        {
+            if (inventory == null)
+                return 0;
+
+            var deadline = PvfExpirationMetadata.NextDailyResetUnixTime(utcNow);
+            var armed = 0;
+            foreach (var listType in ExpirableListTypes)
+            {
+                foreach (var pair in inventory.GetItems(listType))
+                {
+                    var item = pair.Value;
+                    if (item == null || item.ItemId <= 0 || item.ExpireTime != 0
+                        || !InventoryStackRuleService.IsStackable(item)
+                        || !ItemMetadataResolver.TryLoadStackableFile(item.ItemId, out var stackable)
+                        || !StackableExpirationPolicyResolver.TryResolve(stackable, out var policy)
+                        || !policy.DeleteAtDailyReset)
+                        continue;
+
+                    item.ExpireTime = policy.AbsoluteExpirationUnixTime > 0
+                        ? Math.Min(deadline, policy.AbsoluteExpirationUnixTime)
+                        : deadline;
+                    inventory.MarkDirty(listType, pair.Key);
+                    armed++;
+                }
+            }
+
+            return armed;
+        }
+
+        internal static bool HasExpiredItems(InventoryService inventory, long nowUnixSeconds)
+        {
+            if (inventory == null)
+                return false;
+            foreach (var listType in ExpirableListTypes)
+            {
+                foreach (var pair in inventory.GetItems(listType))
+                {
+                    if (IsExpired(inventory, listType, pair.Value, nowUnixSeconds))
+                        return true;
+                }
+            }
+            return false;
+        }
+
         internal static int RemoveExpiredItemsInRange(
             InventoryService inventory,
             InventoryListType listType,

@@ -1,19 +1,22 @@
 using PvfLib;
 using System;
 using System.Globalization;
+using DfoServer.Game.DailyReset;
 
 namespace DfoServer.Game.Inventory
 {
     internal readonly struct StackableExpirationPolicy
     {
-        internal StackableExpirationPolicy(int absoluteExpirationUnixTime, int usablePeriodDays)
+        internal StackableExpirationPolicy(int absoluteExpirationUnixTime, int usablePeriodDays, bool deleteAtDailyReset)
         {
             AbsoluteExpirationUnixTime = absoluteExpirationUnixTime;
             UsablePeriodDays = usablePeriodDays;
+            DeleteAtDailyReset = deleteAtDailyReset;
         }
 
         internal int AbsoluteExpirationUnixTime { get; }
         internal int UsablePeriodDays { get; }
+        internal bool DeleteAtDailyReset { get; }
     }
 
     internal static class StackableExpirationPolicyResolver
@@ -61,7 +64,13 @@ namespace DfoServer.Game.Inventory
                 return false;
             }
 
-            policy = new StackableExpirationPolicy(absoluteExpiration, usablePeriodDays);
+            if (!StackablePvfValueReader.TryReadOptionalNonNegativeInt(
+                    stackable, "daily delete item", out var hasDailyDelete, out var dailyDeleteValue)
+                || (hasDailyDelete && dailyDeleteValue > 1))
+                return false;
+
+            policy = new StackableExpirationPolicy(
+                absoluteExpiration, usablePeriodDays, hasDailyDelete && dailyDeleteValue == 1);
             return true;
         }
     }
@@ -181,6 +190,14 @@ namespace DfoServer.Game.Inventory
         {
             var expire = DateTimeOffset.Now.ToUnixTimeSeconds() + (long)days * 86400L;
             return (int)Math.Min(int.MaxValue, Math.Max(0, expire));
+        }
+
+        internal static int NextDailyResetUnixTime(DateTime utcNow)
+        {
+            var seconds = new DateTimeOffset(
+                DailyResetService.GetGameDayStartUtc(utcNow).AddDays(1))
+                .ToUnixTimeSeconds();
+            return checked((int)seconds);
         }
 
         private static bool TryConvertServerLocalTime(
