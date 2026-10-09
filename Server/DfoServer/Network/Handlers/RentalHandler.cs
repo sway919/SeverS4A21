@@ -115,8 +115,22 @@ namespace DfoServer.Network.Handlers
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, CommandType, RentalWeaponPacketBuilder.BuildSuccessAck()));
             await RentalInfoPanelNotifier.SyncAsync(session, characterId, luckyStar, _rentalTimeProvider);
 
-            if (_refresh != null && rentResult.SlotIndex >= 0)
-                await _refresh.SendUpdateItemList(session, rentResult.ListType, rentResult.SlotIndex);
+            if (_refresh != null)
+            {
+                // 过期续租先删旧槽再发新物品：旧槽已空，0x000E 会自动编码 empty entry
+                // 让客户端清掉本地已隐藏的过期槽位。
+                if (rentResult.ReplacedExpiredListType.HasValue
+                    && rentResult.ReplacedExpiredSlotIndex >= 0)
+                {
+                    await _refresh.SendUpdateItemList(
+                        session,
+                        rentResult.ReplacedExpiredListType.Value,
+                        rentResult.ReplacedExpiredSlotIndex);
+                }
+
+                if (rentResult.SlotIndex >= 0)
+                    await _refresh.SendUpdateItemList(session, rentResult.ListType, rentResult.SlotIndex);
+            }
         }
 
         private static async Task SendFailure(EnhancedClientSession session, uint result = 0)

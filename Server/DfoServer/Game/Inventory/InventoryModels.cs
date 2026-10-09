@@ -161,6 +161,12 @@ namespace DfoServer.Game.Inventory
 
         // 购买奖励因背包溢出转邮件时置 true，客户端只需要邮箱提醒。
         public bool DeliveredByMail { get; set; }
+
+        // 租赁武器过期续租时被删除的旧物品槽位；仅该路径赋值。
+        // 客户端对已隐藏的过期槽位不会因新物品通知而重新显示，需要额外补发一次旧槽刷新。
+        public InventoryListType? ReplacedExpiredListType { get; set; }
+
+        public short ReplacedExpiredSlotIndex { get; set; } = -1;
     }
 
     public enum PersonalCargoUpgradeTicketStatus

@@ -192,20 +192,42 @@ namespace DfoServer.Game.Inventory
                 return false;
             }
 
+            // 与登录清理同源的绝对时间：过期物品不能走原地续期（客户端已把它隐藏，
+            // 只对该槽发更新包不会让客户端重新显示），必须先删除再重新发放。
+            var nowUnixSeconds = InventoryItemLifecycleService.UtcNowUnixSeconds();
+
             if (TryRefreshExistingRentalWeapon(
                     inventory,
                     InventoryListType.Equipment,
                     itemTemplateId,
                     expireTime,
+                    nowUnixSeconds,
                     out result)
                 || TryRefreshExistingRentalWeapon(
                     inventory,
                     InventoryListType.Main,
                     itemTemplateId,
                     expireTime,
+                    nowUnixSeconds,
                     out result))
             {
                 return true;
+            }
+
+            InventoryMutationResult expiredRemoval = null;
+            if (!TryRemoveExpiredRentalWeapon(
+                    inventory,
+                    InventoryListType.Equipment,
+                    itemTemplateId,
+                    nowUnixSeconds,
+                    out expiredRemoval))
+            {
+                TryRemoveExpiredRentalWeapon(
+                    inventory,
+                    InventoryListType.Main,
+                    itemTemplateId,
+                    nowUnixSeconds,
+                    out expiredRemoval);
             }
 
             if (!InventoryRewardGrantService.TryCreateAndInsert(
@@ -230,6 +252,12 @@ namespace DfoServer.Game.Inventory
             }
 
             result = ToMutationResult(inventory, grant, inventory.CountMainItem(0), walletSp, walletCera, 1);
+            if (expiredRemoval != null)
+            {
+                result.ReplacedExpiredListType = expiredRemoval.ListType;
+                result.ReplacedExpiredSlotIndex = expiredRemoval.SlotIndex;
+            }
+
             return true;
         }
 
@@ -591,18 +619,23 @@ namespace DfoServer.Game.Inventory
             }
         }
 
+        // 原地续期只服务未过期的同 ID 物品；过期物品一律留给
+        // TryRemoveExpiredRentalWeapon 删除后重新发放。
         private static bool TryRefreshExistingRentalWeapon(
             InventoryService inventory,
             InventoryListType listType,
             int itemTemplateId,
             int expireTime,
+            long nowUnixSeconds,
             out InventoryMutationResult result)
         {
             result = null;
             foreach (var pair in inventory.GetItems(listType))
             {
                 var core = pair.Value;
-                if (core == null || core.ItemId != itemTemplateId)
+                if (core == null
+                    || core.ItemId != itemTemplateId
+                    || InventoryItemLifecycleService.IsExpired(inventory, listType, core, nowUnixSeconds))
                     continue;
 
                 var updated = core.Copy();
@@ -624,6 +657,32 @@ namespace DfoServer.Game.Inventory
                     AppliedCount = 1,
                 };
                 return true;
+            }
+
+            return false;
+        }
+
+        // 删除已过期的同 ID 租赁武器（内部做过期校验 + dirty 标记，由协调器同事务落库）。
+        private static bool TryRemoveExpiredRentalWeapon(
+            InventoryService inventory,
+            InventoryListType listType,
+            int itemTemplateId,
+            long nowUnixSeconds,
+            out InventoryMutationResult removal)
+        {
+            removal = null;
+            foreach (var pair in inventory.GetItems(listType))
+            {
+                if (InventoryItemLifecycleService.TryRemoveExpiredSource(
+                        inventory,
+                        listType,
+                        pair.Key,
+                        itemTemplateId,
+                        nowUnixSeconds,
+                        out removal))
+                {
+                    return true;
+                }
             }
 
             return false;
