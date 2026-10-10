@@ -496,22 +496,26 @@ WHEN NEW.character_id=62002 BEGIN SELECT RAISE(ABORT, 'failed member selftest');
             check("fresh DB uses the current schema and creates both progression tables",
                 fixture.Scalar("PRAGMA user_version;") == SqliteMigrations.CurrentVersion
                     && fixture.Count("character_level_up_events") == 0 && fixture.Count("character_level_up_rewards") == 0);
-            var legacy = fixture.Mailbox.SendSystemMail(CharacterLevelUpRewardService.BuildMail(Fixture.CharacterId,
-                Fixture.AccountId, "升级测试", new CharacterLevelUpReward(70, 3330, 250), fixture.Now));
-            check("legacy upgrade-mail fixture uses the real mailbox", legacy.Success);
+            fixture.Experience.GrantToLevel(fixture.Player, 70, "pre-migration-character");
             fixture.Execute(@"DROP TABLE character_level_up_rewards; DROP TABLE character_level_up_events;
 UPDATE schema_metadata SET schema_version=33; PRAGMA user_version=33;");
             fixture.ApplyMigrations();
-            check("v33 upgrade imports legacy reward mail without issuing historical rewards",
-                fixture.Scalar("PRAGMA user_version;") == 34 && fixture.Count("character_level_up_rewards") == 1
-                    && fixture.Count("character_level_up_events") == 0 && fixture.Count("mailbox_messages") == 1);
+            check("v33 upgrade creates empty progression tables without issuing historical rewards",
+                fixture.Scalar("PRAGMA user_version;") == 34
+                    && fixture.Scalar("SELECT schema_version FROM schema_metadata;") == 34
+                    && fixture.Count("character_level_up_rewards") == 0
+                    && fixture.Count("character_level_up_events") == 0 && fixture.Count("mailbox_messages") == 0);
             fixture.ApplyMigrations();
-            fixture.Experience.GrantToLevel(fixture.Player, 70, "post-migration");
-            check("repeat initialization and renamed expiry payload cannot resend an imported grade",
-                fixture.Rewards.ProcessPending().Count == 0 && fixture.Count("mailbox_messages") == 1);
+            check("repeat initialization does not backfill an existing character's levels",
+                fixture.Rewards.ProcessPending().Count == 0 && fixture.Count("mailbox_messages") == 0);
+            fixture.Experience.GrantToLevel(fixture.Player, 71, "post-migration");
+            var delivered = fixture.Rewards.ProcessPending();
+            check("post-migration upgrades issue only newly reached configured levels",
+                delivered.Count == 1 && delivered[0].Level == 71
+                    && fixture.Count("character_level_up_rewards") == 1 && fixture.Count("mailbox_messages") == 1);
             fixture.Execute(@"DROP TABLE character_level_up_rewards; DROP TABLE character_level_up_events;
 UPDATE schema_metadata SET schema_version=33; PRAGMA user_version=33;
-CREATE VIEW character_level_up_rewards AS SELECT 1 AS invalid_schema;");
+CREATE TABLE idx_character_level_up_events_pending (invalid_schema INTEGER);");
             bool rejected = false;
             try { fixture.ApplyMigrations(); }
             catch (SqliteException) { rejected = true; }
@@ -519,7 +523,7 @@ CREATE VIEW character_level_up_rewards AS SELECT 1 AS invalid_schema;");
                 rejected && fixture.Scalar("PRAGMA user_version;") == 33
                     && fixture.Scalar("SELECT schema_version FROM schema_metadata;") == 33
                     && fixture.Scalar("SELECT COUNT(*) FROM sqlite_master WHERE name='character_level_up_events';") == 0);
-            fixture.Execute("DROP VIEW character_level_up_rewards;");
+            fixture.Execute("DROP TABLE idx_character_level_up_events_pending;");
             fixture.ApplyMigrations();
             fixture.Execute("UPDATE schema_metadata SET schema_version=35; PRAGMA user_version=35;");
             rejected = false;

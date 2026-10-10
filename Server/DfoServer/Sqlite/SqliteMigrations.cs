@@ -169,20 +169,7 @@ CREATE TABLE IF NOT EXISTS character_level_up_rewards (
     message_id INTEGER REFERENCES mailbox_messages(message_id) ON DELETE SET NULL,
     delivered_at_utc TEXT NOT NULL,
     PRIMARY KEY(character_id, reward_key, level)
-);
--- 兼容旧实现已经发出的升级邮件，迁移不补发历史等级。
-INSERT OR IGNORE INTO character_level_up_rewards
-    (character_id, reward_key, level, item_id, item_count, message_id, delivered_at_utc)
-SELECT m.receiver_character_id, 'base-level-up',
-       CAST(substr(m.idempotency_key, length('level-up-reward:' || m.receiver_character_id || ':') + 1) AS INTEGER),
-       a.item_template_id, a.item_count, m.message_id, m.created_at
-FROM mailbox_messages m JOIN mailbox_attachments a ON a.message_id = m.message_id
-WHERE m.sender_character_id = m.receiver_character_id AND m.mail_type = 1 AND m.gold = 0
-  AND m.idempotency_key = 'level-up-reward:' || m.receiver_character_id || ':' ||
-      CAST(substr(m.idempotency_key, length('level-up-reward:' || m.receiver_character_id || ':') + 1) AS INTEGER)
-  AND CAST(substr(m.idempotency_key, length('level-up-reward:' || m.receiver_character_id || ':') + 1) AS INTEGER) BETWEEN 2 AND 255
-  AND (SELECT COUNT(*) FROM mailbox_attachments x WHERE x.message_id = m.message_id) = 1
-ORDER BY m.message_id;");
+);");
         }
 
         private static void ApplyCharacterNpcFavor(
