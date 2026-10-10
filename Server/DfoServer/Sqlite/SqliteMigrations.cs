@@ -56,6 +56,7 @@ namespace DfoServer.Sqlite
                 new MigrationStep(31, "add_guild_management", ApplyGuildManagement),
                 new MigrationStep(32, "add_character_blacklist", ApplyCharacterBlacklist),
                 new MigrationStep(33, "add_character_npc_favor", ApplyCharacterNpcFavor),
+                new MigrationStep(34, "add_character_level_up_events_and_rewards", ApplyCharacterLevelUpRewards),
             };
 
         internal static int CurrentVersion =>
@@ -138,6 +139,50 @@ ON CONFLICT(singleton_id) DO UPDATE SET
         {
             var metadata = ReadMetadata(connection);
             return string.Equals(metadata.BaselineId, BaselineId, StringComparison.Ordinal);
+        }
+
+        private static void ApplyCharacterLevelUpRewards(
+            SqliteConnection connection,
+            SqliteTransaction transaction)
+        {
+            ExecuteSql(connection, transaction, @"
+CREATE TABLE IF NOT EXISTS character_level_up_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    character_id INTEGER NOT NULL REFERENCES characters(character_id) ON DELETE CASCADE,
+    previous_level INTEGER NOT NULL CHECK(previous_level BETWEEN 1 AND 254),
+    new_level INTEGER NOT NULL CHECK(new_level BETWEEN 2 AND 255 AND new_level > previous_level),
+    source TEXT NOT NULL,
+    occurred_at_utc TEXT NOT NULL,
+    base_rewards_processed_at_utc TEXT,
+    retry_after_unix INTEGER NOT NULL DEFAULT 0,
+    attempts INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_character_level_up_events_pending
+    ON character_level_up_events(retry_after_unix, event_id)
+    WHERE base_rewards_processed_at_utc IS NULL;
+CREATE TABLE IF NOT EXISTS character_level_up_rewards (
+    character_id INTEGER NOT NULL REFERENCES characters(character_id) ON DELETE CASCADE,
+    reward_key TEXT NOT NULL,
+    level INTEGER NOT NULL CHECK(level BETWEEN 2 AND 255),
+    item_id INTEGER NOT NULL CHECK(item_id > 0),
+    item_count INTEGER NOT NULL CHECK(item_count > 0),
+    message_id INTEGER REFERENCES mailbox_messages(message_id) ON DELETE SET NULL,
+    delivered_at_utc TEXT NOT NULL,
+    PRIMARY KEY(character_id, reward_key, level)
+);
+-- 兼容旧实现已经发出的升级邮件，迁移不补发历史等级。
+INSERT OR IGNORE INTO character_level_up_rewards
+    (character_id, reward_key, level, item_id, item_count, message_id, delivered_at_utc)
+SELECT m.receiver_character_id, 'base-level-up',
+       CAST(substr(m.idempotency_key, length('level-up-reward:' || m.receiver_character_id || ':') + 1) AS INTEGER),
+       a.item_template_id, a.item_count, m.message_id, m.created_at
+FROM mailbox_messages m JOIN mailbox_attachments a ON a.message_id = m.message_id
+WHERE m.sender_character_id = m.receiver_character_id AND m.mail_type = 1 AND m.gold = 0
+  AND m.idempotency_key = 'level-up-reward:' || m.receiver_character_id || ':' ||
+      CAST(substr(m.idempotency_key, length('level-up-reward:' || m.receiver_character_id || ':') + 1) AS INTEGER)
+  AND CAST(substr(m.idempotency_key, length('level-up-reward:' || m.receiver_character_id || ':') + 1) AS INTEGER) BETWEEN 2 AND 255
+  AND (SELECT COUNT(*) FROM mailbox_attachments x WHERE x.message_id = m.message_id) = 1
+ORDER BY m.message_id;");
         }
 
         private static void ApplyCharacterNpcFavor(
