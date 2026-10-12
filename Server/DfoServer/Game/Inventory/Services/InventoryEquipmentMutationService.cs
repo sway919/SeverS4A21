@@ -13,6 +13,14 @@ namespace DfoServer.Game.Inventory
         private const short GoldSlot = 0;
         private const string EmblemCollectorActionType = "emblem collector";
 
+        // 徽章回收箱(0x03B8)拒绝原因对应的客户端 status: 客户端按该值选弹窗文案
+        //   status 1/3/5 → 字符串 0x11719「无法回收该装备的徽章」
+        //   status 2     → 字符串 0x11718「装备上的徽章等级不同。只适用于镶嵌了2个相同等级徽章的装备。」
+        //   status 4     → 字符串 0x11716「只有镶嵌了2个徽章的装备(武器/防具/特殊装备)才能使用徽章回收箱。」
+        internal const uint EmblemCollectFailureNotCollectable = 1;
+        internal const uint EmblemCollectFailureGradeMismatch = 2;
+        internal const uint EmblemCollectFailureNotFilled = 4;
+
         internal static bool TryEnchantByBead(
             InventoryService inventory,
             EnchantByBeadCommand command,
@@ -250,7 +258,29 @@ namespace DfoServer.Game.Inventory
             int targetUid,
             out EquipmentEmblemCollectResult result)
         {
+            return TryCollectEquipmentEmblems(
+                inventory,
+                boxSlotIndex,
+                boxTemplateId,
+                targetSlotIndex,
+                targetUid,
+                out result,
+                out _);
+        }
+
+        // 带拒绝原因的重载: failureStatus 是客户端弹窗文案的选择依据(见文件头 EmblemCollectFailure* 常量),
+        // 成功时为 0。判定顺序与语义与原实现一致, 仅额外报告拒绝原因。
+        internal static bool TryCollectEquipmentEmblems(
+            InventoryService inventory,
+            short boxSlotIndex,
+            int boxTemplateId,
+            short targetSlotIndex,
+            int targetUid,
+            out EquipmentEmblemCollectResult result,
+            out uint failureStatus)
+        {
             result = null;
+            failureStatus = EmblemCollectFailureNotCollectable;
             if (inventory == null
                 || boxTemplateId <= 0
                 || targetUid <= 0
@@ -284,15 +314,59 @@ namespace DfoServer.Game.Inventory
             if (firstEmblemTemplateId <= 0 && secondEmblemTemplateId <= 0)
                 return false;
 
-            if (firstEmblemTemplateId > 0
-                && (!TryResolveEmblemGrade(firstEmblemTemplateId, out var firstEmblemGrade)
-                    || !boxGrades.Contains(firstEmblemGrade)))
+            // 每个已开徽章孔都必须有徽章（客户端本地校验同款规则，客户端补丁已把它跳过，服务端补上）；
+            // 未镶满时只对白金（S 孔）徽章开放：装备只有 1 个孔、且徽章的 socket 类型与装备孔位匹配
+            // （S 孔装备 + S 孔白金徽章 → 通过；A/C 孔装备 + 单颗灿烂 → 拒绝）。
+            if (firstEmblemTemplateId <= 0)
                 return false;
 
-            if (secondEmblemTemplateId > 0
-                && (!TryResolveEmblemGrade(secondEmblemTemplateId, out var secondEmblemGrade)
-                    || !boxGrades.Contains(secondEmblemGrade)))
+            if (secondEmblemTemplateId <= 0)
+            {
+                // 可镶 2 个徽章的装备只镶了 1 个 → 文案「只有镶嵌了2个徽章的装备…才能使用徽章回收箱。」
+                if (target.EmblemSocketCount > 1)
+                {
+                    failureStatus = EmblemCollectFailureNotFilled;
+                    return false;
+                }
+
+                // 未镶满只可能发生在单孔装备上：辅助装备/魔法石按 PVF 只有 S 孔，只镶白金徽章
+                // （灿烂/华丽是 A/C 孔，插不进单孔装备）。故这里要求徽章 socket 与装备孔位匹配，
+                // 等价于"只有白金徽章允许单颗"；孔位不匹配同样按"未镶满"回报。
+                if (!CanAttachEmblemToJewelSocket(
+                        ResolveJewelSocketType(target.ItemId),
+                        ItemMetadataResolver.ResolveEmblemSocketType(firstEmblemTemplateId)))
+                {
+                    failureStatus = EmblemCollectFailureNotFilled;
+                    return false;
+                }
+            }
+
+            // 先分别判定两颗（或唯一那颗）徽章的等级是否落在箱子 [action] 参数集合内，再决定拒绝原因：
+            // 都不符合（含等级解析失败）→ 无法回收该装备的徽章; 两颗都存在且等级不同 → 徽章等级不同。
+            var firstGrade = 0;
+            var secondGrade = 0;
+            var firstAccepted = firstEmblemTemplateId > 0
+                && TryResolveEmblemGrade(firstEmblemTemplateId, out firstGrade)
+                && boxGrades.Contains(firstGrade);
+            var secondAccepted = secondEmblemTemplateId > 0
+                && TryResolveEmblemGrade(secondEmblemTemplateId, out secondGrade)
+                && boxGrades.Contains(secondGrade);
+
+            if (secondEmblemTemplateId > 0)
+            {
+                if (!firstAccepted && !secondAccepted)
+                    return false;
+
+                if (firstGrade != secondGrade)
+                {
+                    failureStatus = EmblemCollectFailureGradeMismatch;
+                    return false;
+                }
+            }
+            else if (!firstAccepted)
+            {
                 return false;
+            }
 
             var updatedTarget = target.Copy();
             var returnedEmblemTemplateId = firstEmblemTemplateId > 0
@@ -341,6 +415,7 @@ namespace DfoServer.Game.Inventory
                 BoxSlotIndex = boxSlotIndex,
                 BoxRemainingCount = boxDelete.RemainingCount,
             };
+            failureStatus = 0;
             return true;
         }
 
