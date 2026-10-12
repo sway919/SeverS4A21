@@ -40,6 +40,7 @@ namespace DfoServer.SelfTests
 
             Scenario("PVF reward definitions", () => VerifyCatalog(Check));
             Scenario("edited PVF rewards and configuration failure recovery", () => VerifyConfigurationChanges(Check));
+            Scenario("production GBK character names", () => VerifyCharacterNames(Check));
             Scenario("shared progression entry", () => VerifyProgression(Check));
             Scenario("monster experience checkpoints survive later failures", () => VerifyMonsterExperienceRecovery(Check));
             Scenario("caller transaction rollback", () => VerifyProgressionRollback(Check));
@@ -96,6 +97,45 @@ namespace DfoServer.SelfTests
             check("reward mail is system mail with a 30-day UTC expiry",
                 requests.All(request => request.MailType == 1 && request.Unlimited == false
                     && request.ExpireAtUtc == fixture.Now.AddDays(30) && request.SenderName == string.Empty));
+        }
+
+        private static void VerifyCharacterNames(Action<string, bool> check)
+        {
+            const string name = "升级测试";
+            foreach (bool storedAsBlob in new[] { true, false })
+            {
+                using var fixture = new Fixture();
+                fixture.Database.Write((connection, transaction) =>
+                {
+                    using var command = connection.CreateCommand();
+                    command.Transaction = transaction;
+                    command.CommandText = "UPDATE characters SET name=@name WHERE character_id=@cid;";
+                    command.Parameters.AddWithValue("@name", storedAsBlob ? (object)ClientTextEncoding.GetBytes(name) : name);
+                    command.Parameters.AddWithValue("@cid", Fixture.CharacterId);
+                    command.ExecuteNonQuery();
+                });
+                fixture.Experience.GrantToLevel(fixture.Player, 70, "character-name");
+                var pending = fixture.Database.Read(connection =>
+                {
+                    using var transaction = connection.BeginTransaction(deferred: true);
+                    long eventId = CharacterLevelUpEventRepository.LoadPendingIds(
+                        connection, fixture.Now.ToUnixTimeSeconds(), 1).Single();
+                    var change = CharacterLevelUpEventRepository.LoadPending(
+                        connection, transaction, eventId, fixture.Now.ToUnixTimeSeconds(),
+                        out int accountId, out string characterName, out bool deleted);
+                    return (Event: change, AccountId: accountId, Name: characterName, Deleted: deleted);
+                });
+                string storage = storedAsBlob ? "GBK BLOB" : "TEXT";
+                check("pending upgrade preserves the character identity and Chinese name: " + storage,
+                    pending.Event?.CharacterId == Fixture.CharacterId && pending.AccountId == Fixture.AccountId
+                        && pending.Name == name && !pending.Deleted);
+
+                var delivered = fixture.Rewards.ProcessPending();
+                check("production reward mail and audit preserve the receiver name: " + storage,
+                    delivered.Count == 1 && fixture.Pending() == 0
+                        && fixture.Scalar("SELECT COUNT(*) FROM mailbox_messages WHERE receiver_character_id=62002 AND receiver_name='升级测试';") == 1
+                        && fixture.Scalar("SELECT COUNT(*) FROM mailbox_system_mail_audit WHERE receiver_character_id=62002 AND receiver_name='升级测试';") == 1);
+            }
         }
 
         private static void VerifyProgression(Action<string, bool> check)

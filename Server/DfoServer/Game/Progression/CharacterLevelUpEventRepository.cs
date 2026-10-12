@@ -1,3 +1,4 @@
+using DfoServer.Infrastructure;
 using Microsoft.Data.Sqlite;
 using System;
 using System.Collections.Generic;
@@ -77,7 +78,9 @@ WHERE e.event_id = @id AND e.base_rewards_processed_at_utc IS NULL AND e.retry_a
             using var reader = command.ExecuteReader();
             if (!reader.Read()) return null;
             accountId = reader.GetInt32(6);
-            characterName = reader.GetString(7);
+            characterName = reader.GetValue(7) is byte[] nameBytes
+                ? ClientTextEncoding.GetString(nameBytes)
+                : reader.GetString(7);
             deleted = reader.GetInt32(8) != 0;
             return Read(reader);
         }
