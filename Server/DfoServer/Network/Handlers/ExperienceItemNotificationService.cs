@@ -137,12 +137,13 @@ namespace DfoServer.Network.Handlers
                     record, addition, accountCharacters, honor, result.SyncedSkills)));
         }
 
-        private static Task SendExperienceAsync(
+        private static async Task SendExperienceAsync(
             EnhancedClientSession session,
             ExperienceItemUseResult result,
             HonorLevelSummary honor,
             GrowthCapsuleSummary growthCapsule)
-            => session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+        {
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
                 0x00,
                 (ushort)NotiPacketTypeA21.EXP,
                 ExpNotificationBuilder.Build(
@@ -153,6 +154,14 @@ namespace DfoServer.Network.Handlers
                     growthCapsuleExp: GrowthCapsuleDataProvider.GetDisplayProgress(
                         result.NewLevel,
                         growthCapsule))));
+            if (result.GrantedExp > 0)
+            {
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x00,
+                    (ushort)NotiPacketTypeA21.SERVER_NOTICE_MESSAGE,
+                    SystemChatNotice.Build(SystemChatNotice.FormatExperience(result.GrantedExp))));
+            }
+        }
 
         private static async Task SendQuestListAsync(EnhancedClientSession session)
         {
