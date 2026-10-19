@@ -1019,6 +1019,9 @@ namespace DfoServer.Network.Handlers.Dungeon
                 // 按 DungeonEntryHandler 入场扣金的惯例补主背包 0 号金币虚拟槽的 0x000E 刷新。
                 if (_svc.InventoryRefresh != null)
                     await _svc.InventoryRefresh.SendGoldUpdate(session);
+                await SendSystemPickupNoticeAsync(
+                    session,
+                    SystemChatNotice.FormatGold((long)pickup.GoldAmount + pickup.ExtraGold));
                 FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] GET_ITEM: gold pickup srcSlot={req.SrcSlot} gold={pickup.GoldAmount} extra={pickup.ExtraGold}");
             }
             else
@@ -1053,9 +1056,18 @@ namespace DfoServer.Network.Handlers.Dungeon
                             new[] { pickup.PickedUpItemId });
                 }
                 var inventorySlotLog = pickup.IsEpicPiece ? "none" : pickup.InventorySlot.ToString();
+                await SendSystemPickupNoticeAsync(
+                    session,
+                    SystemChatNotice.FormatItem(SystemChatNotice.ResolveItemName(pickup.PickedUpItemId)));
                 FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] GET_ITEM: item pickup srcSlot={req.SrcSlot} templateId={pickup.PickedUpItemId} invSlot={inventorySlotLog}");
             }
         }
+
+        private static Task SendSystemPickupNoticeAsync(EnhancedClientSession session, string message)
+            => session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x00,
+                (ushort)NotiPacketTypeA21.SERVER_NOTICE_MESSAGE,
+                SystemChatNotice.Build(message)));
 
         private static void PersistPickup(EnhancedClientSession session, ushort srcSlot)
         {

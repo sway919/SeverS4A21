@@ -83,6 +83,7 @@ namespace DfoServer
             ("--selftest-gold-limit", SelfTests.GoldLimitSelfTest.Run),
             ("--selftest-friends", SelfTests.UnitedFriendSystemSelfTest.Run),
             ("--selftest-a21-one-to-one-chat", SelfTests.A21OneToOneChatSelfTest.Run),
+            ("--selftest-system-chat-notice", SelfTests.SystemChatNoticeSelfTest.Run),
             ("--selftest-a21-item-hyperlink-chat", SelfTests.A21ItemHyperlinkChatSelfTest.Run),
             ("--selftest-a21-blacklist", SelfTests.A21BlacklistSelfTest.Run),
             ("--selftest-a21-guild-creation", SelfTests.A21GuildCreationSelfTest.Run),

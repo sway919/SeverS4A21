@@ -193,6 +193,13 @@ namespace DfoServer.Network.Handlers.Dungeon
                     growthCapsuleExp: GrowthCapsuleDataProvider.GetDisplayProgress(
                         session.Player.Level,
                         capsule))));
+            if (grant.NormalExpGain > 0)
+            {
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x00,
+                    (ushort)NotiPacketTypeA21.SERVER_NOTICE_MESSAGE,
+                    SystemChatNotice.Build(SystemChatNotice.FormatExperience(grant.NormalExpGain))));
+            }
         }
 
         internal async Task SendInDungeonLevelUpFollowups(

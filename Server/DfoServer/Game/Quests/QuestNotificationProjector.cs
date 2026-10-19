@@ -201,6 +201,12 @@ namespace DfoServer.Game.Quests
                         growthCapsuleExp: GrowthCapsuleDataProvider.GetDisplayProgress(
                             player.Level,
                             growthCapsule)));
+                if (result.Exp > 0)
+                {
+                    await _sender.SendNotiAsync(
+                        (ushort)NotiPacketTypeA21.SERVER_NOTICE_MESSAGE,
+                        SystemChatNotice.Build(SystemChatNotice.FormatExperience(result.Exp)));
+                }
             }
             else if (needsExpNotification)
             {
