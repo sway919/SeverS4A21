@@ -43,6 +43,7 @@ namespace DfoServer.Game.Inventory
                 && source.ItemId == destination.ItemId
                 && IsStackable(source)
                 && IsStackable(destination)
+                && source.ExpireTime == destination.ExpireTime
                 && source.EnchantUpgradeCount == destination.EnchantUpgradeCount;
         }
 
