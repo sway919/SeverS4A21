@@ -309,6 +309,138 @@ namespace DfoServer.SelfTests
                 && BitConverter.ToUInt32(rentalFull, 1) == 2,
                 ref failures);
 
+            // 续租：未过期原地续期；过期先删旧槽再重新发放（被删槽位随 result 报给 handler 补发刷新）。
+            var rentalNow = InventoryItemLifecycleService.UtcNowUnixSeconds();
+            var rentalRenewExpire = (int)(rentalNow + RentalWeaponRequestCodec.RentalDurationSeconds);
+            ItemMetadataResolver.TryResolveItemKind(401000037, out var rentalItemKind);
+
+            var rentalRenewInventory = new InventoryService(1006, 1006);
+            rentalRenewInventory.SetItem(
+                InventoryListType.Equipment,
+                12,
+                new ItemCore
+                {
+                    ItemKind = rentalItemKind,
+                    ItemId = 401000037,
+                    Count = 1,
+                    Durability = 1,
+                    ExpireTime = (int)(rentalNow + 60),
+                });
+            var rentalRenewOk = InventoryShopRuntimeService.TryRentWeapon(
+                rentalRenewInventory,
+                401000037,
+                rentalRenewExpire,
+                out var rentalRenew);
+            var rentalRenewedCore = rentalRenewOk && rentalRenew != null
+                ? rentalRenewInventory.GetItem(rentalRenew.ListType, rentalRenew.SlotIndex)
+                : null;
+            Check(
+                "A21 rental weapon renewal refreshes the unexpired equipment slot in place",
+                rentalRenewOk
+                && rentalRenew != null
+                && rentalRenew.ListType == InventoryListType.Equipment
+                && rentalRenew.SlotIndex == 12
+                && !rentalRenew.ReplacedExpiredListType.HasValue
+                && rentalRenew.ReplacedExpiredSlotIndex == -1
+                && rentalRenewedCore != null
+                && rentalRenewedCore.ItemId == 401000037
+                && rentalRenewedCore.ExpireTime == rentalRenewExpire
+                && rentalMetadata != null
+                && rentalRenewedCore.Durability == rentalMetadata.Durability,
+                ref failures);
+
+            var rentalExpiredEquipmentInventory = new InventoryService(1007, 1007);
+            rentalExpiredEquipmentInventory.SetItem(
+                InventoryListType.Equipment,
+                12,
+                new ItemCore
+                {
+                    ItemKind = rentalItemKind,
+                    ItemId = 401000037,
+                    Count = 1,
+                    Durability = 1,
+                    ExpireTime = (int)(rentalNow - 10),
+                });
+            var rentalExpiredEquipmentOk = InventoryShopRuntimeService.TryRentWeapon(
+                rentalExpiredEquipmentInventory,
+                401000037,
+                rentalRenewExpire,
+                out var rentalExpiredEquipment);
+            var rentalExpiredEquipmentCore =
+                rentalExpiredEquipmentOk && rentalExpiredEquipment != null
+                    ? rentalExpiredEquipmentInventory.GetItem(
+                        rentalExpiredEquipment.ListType,
+                        rentalExpiredEquipment.SlotIndex)
+                    : null;
+            Check(
+                "A21 rental weapon renewal replaces an expired equipment slot with a fresh backpack item",
+                rentalExpiredEquipmentOk
+                && rentalExpiredEquipment != null
+                && rentalExpiredEquipment.ListType == InventoryListType.Main
+                && rentalExpiredEquipment.ReplacedExpiredListType == InventoryListType.Equipment
+                && rentalExpiredEquipment.ReplacedExpiredSlotIndex == 12
+                && rentalExpiredEquipmentInventory.GetItem(InventoryListType.Equipment, 12) == null
+                && rentalExpiredEquipmentCore != null
+                && rentalExpiredEquipmentCore.ItemId == 401000037
+                && rentalExpiredEquipmentCore.ExpireTime == rentalRenewExpire,
+                ref failures);
+
+            var rentalExpiredMainInventory = new InventoryService(1008, 1008);
+            rentalExpiredMainInventory.SetItem(
+                InventoryListType.Main,
+                30,
+                new ItemCore
+                {
+                    ItemKind = rentalItemKind,
+                    ItemId = 401000037,
+                    Count = 1,
+                    Durability = 1,
+                    ExpireTime = (int)(rentalNow - 10),
+                });
+            var rentalExpiredMainOk = InventoryShopRuntimeService.TryRentWeapon(
+                rentalExpiredMainInventory,
+                401000037,
+                rentalRenewExpire,
+                out var rentalExpiredMain);
+            var rentalExpiredMainCore = rentalExpiredMainOk && rentalExpiredMain != null
+                ? rentalExpiredMainInventory.GetItem(
+                    rentalExpiredMain.ListType,
+                    rentalExpiredMain.SlotIndex)
+                : null;
+            Check(
+                "A21 rental weapon renewal replaces an expired backpack slot",
+                rentalExpiredMainOk
+                && rentalExpiredMain != null
+                && rentalExpiredMain.ListType == InventoryListType.Main
+                && rentalExpiredMain.ReplacedExpiredListType == InventoryListType.Main
+                && rentalExpiredMain.ReplacedExpiredSlotIndex == 30
+                && rentalExpiredMainInventory.GetItem(InventoryListType.Main, 30) == null
+                && rentalExpiredMainCore != null
+                && rentalExpiredMainCore.ItemId == 401000037
+                && rentalExpiredMainCore.ExpireTime == rentalRenewExpire,
+                ref failures);
+
+            var rentalFreshInventory = new InventoryService(1009, 1009);
+            var rentalFreshOk = InventoryShopRuntimeService.TryRentWeapon(
+                rentalFreshInventory,
+                401000037,
+                rentalRenewExpire,
+                out var rentalFresh);
+            var rentalFreshCore = rentalFreshOk && rentalFresh != null
+                ? rentalFreshInventory.GetItem(rentalFresh.ListType, rentalFresh.SlotIndex)
+                : null;
+            Check(
+                "A21 rental weapon renewal without an existing copy still grants a fresh item",
+                rentalFreshOk
+                && rentalFresh != null
+                && rentalFresh.ListType == InventoryListType.Main
+                && !rentalFresh.ReplacedExpiredListType.HasValue
+                && rentalFresh.ReplacedExpiredSlotIndex == -1
+                && rentalFreshCore != null
+                && rentalFreshCore.ItemId == 401000037
+                && rentalFreshCore.ExpireTime == rentalRenewExpire,
+                ref failures);
+
             var invalidRentalRequest = new byte[RentalWeaponRequestCodec.RequestBodySize];
             Buffer.BlockCopy(BitConverter.GetBytes(727014u), 0, invalidRentalRequest, RentalWeaponRequestCodec.ItemTemplateOffset, 4);
             Check(
