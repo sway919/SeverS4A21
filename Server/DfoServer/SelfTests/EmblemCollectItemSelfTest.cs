@@ -8,18 +8,32 @@ namespace DfoServer.SelfTests
 {
     public static class EmblemCollectItemSelfTest
     {
-        // 2026-10-10 实机抓包 body: boxSlot=4 | 未知=0x32 | count=1 | targetSlot=9 |
-        // boxSlot=4 | boxTemplateId=0x0028F056 | targetSlot=9 | targetUid=0x05F7DE8C。
-        private static readonly byte[] CapturedBody =
+        // 实机抓包 body（26B）。客户端只写 +0x0E 起的 12 字节，前 14 字节是栈残留，
+        // 真实字段为：+0x0E u16 箱子槽位 | +0x10 u32 箱子模板 | +0x14 u16 目标槽位 | +0x16 u32 目标模板。
+        // 帧 1 来自 2026-10-10（残留值与真实箱位/槽位巧合一致，曾被误当成布局依据）；
+        // 帧 2-4 来自 2026-10-12（残留与真实值不一致，字段值与 inventory.db 的槽位/模板逐项吻合）。
+        private static readonly (string Name, byte[] Body, short BoxSlot, int BoxTemplateId, short TargetSlot, int TargetTemplateId)[] CapturedFrames =
         {
-            0x04, 0x00, 0x00, 0x00,
-            0x32, 0x00, 0x00, 0x00,
-            0x01, 0x00, 0x00, 0x00,
-            0x09, 0x00,
-            0x04, 0x00,
-            0x56, 0xF0, 0x28, 0x00,
-            0x09, 0x00,
-            0x8C, 0xDE, 0xF7, 0x05,
+            ("2026-10-10", new byte[]
+            {
+                0x04, 0x00, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x09, 0x00,
+                0x04, 0x00, 0x56, 0xF0, 0x28, 0x00, 0x09, 0x00, 0x8C, 0xDE, 0xF7, 0x05,
+            }, 4, 0x0028F056, 9, 0x05F7DE8C),
+            ("2026-10-12 白金箱", new byte[]
+            {
+                0x04, 0x00, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0C, 0x00,
+                0x6E, 0x00, 0x54, 0xF0, 0x28, 0x00, 0x0C, 0x00, 0x02, 0x21, 0xFB, 0x05,
+            }, 110, 2682964, 12, 100344066),
+            ("2026-10-12 华丽箱", new byte[]
+            {
+                0x04, 0x00, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x13, 0x00,
+                0x70, 0x00, 0x53, 0xF0, 0x28, 0x00, 0x13, 0x00, 0x48, 0xE8, 0x01, 0x00,
+            }, 112, 2682963, 19, 125000),
+            ("2026-10-12 灿烂箱", new byte[]
+            {
+                0x04, 0x00, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x13, 0x00,
+                0x6F, 0x00, 0x56, 0xF0, 0x28, 0x00, 0x13, 0x00, 0x48, 0xE8, 0x01, 0x00,
+            }, 111, 2682966, 19, 125000),
         };
 
         private const int BrilliantBoxItemId = 2682966;  // 灿烂的徽章回收箱, [emblem collector] 3
@@ -44,6 +58,7 @@ namespace DfoServer.SelfTests
             var failures = 0;
 
             VerifyRequestParsing(ref failures);
+            VerifyResponseBodies(ref failures);
             VerifyMutationRules(ref failures);
 
             Console.WriteLine(failures == 0
@@ -54,13 +69,29 @@ namespace DfoServer.SelfTests
 
         private static void VerifyRequestParsing(ref int failures)
         {
+            foreach (var (name, body, boxSlot, boxTemplateId, targetSlot, targetTemplateId) in CapturedFrames)
+            {
+                Check(
+                    $"0x03B8 request parses the captured body ({name})",
+                    InventoryHandler.TryParseEmblemCollectBody(body, out var request)
+                    && request.BoxSlotIndex == boxSlot
+                    && request.BoxTemplateId == boxTemplateId
+                    && request.TargetSlotIndex == targetSlot
+                    && request.TargetTemplateId == targetTemplateId,
+                    ref failures);
+            }
+
+            // 回归：客户端构造点从不写前 14 字节（栈残留），它们取任何值都不得影响解析。
+            var arbitraryLeading = (byte[])CapturedFrames[2].Body.Clone();
+            for (var i = 0; i < 14; i++)
+                arbitraryLeading[i] = 0xFF;
             Check(
-                "0x03B8 request parses the captured body",
-                InventoryHandler.TryParseEmblemCollectBody(CapturedBody, out var request)
-                && request.BoxSlotIndex == 4
-                && request.BoxTemplateId == 0x0028F056
-                && request.TargetSlotIndex == 9
-                && request.TargetUid == 0x05F7DE8C,
+                "0x03B8 request ignores the leading 14 bytes",
+                InventoryHandler.TryParseEmblemCollectBody(arbitraryLeading, out var arbitrary)
+                && arbitrary.BoxSlotIndex == 112
+                && arbitrary.BoxTemplateId == 2682963
+                && arbitrary.TargetSlotIndex == 19
+                && arbitrary.TargetTemplateId == 125000,
                 ref failures);
 
             Check(
@@ -73,25 +104,59 @@ namespace DfoServer.SelfTests
                 !InventoryHandler.TryParseEmblemCollectBody(null, out _),
                 ref failures);
 
-            var countMismatch = (byte[])CapturedBody.Clone();
-            countMismatch[8] = 0x02;
+            var zeroBoxTemplate = (byte[])CapturedFrames[2].Body.Clone();
+            Array.Clear(zeroBoxTemplate, 0x10, 4);
             Check(
-                "0x03B8 request rejects count != 1",
-                !InventoryHandler.TryParseEmblemCollectBody(countMismatch, out _),
+                "0x03B8 request rejects a zero box template id",
+                !InventoryHandler.TryParseEmblemCollectBody(zeroBoxTemplate, out _),
                 ref failures);
 
-            var duplicateBoxSlotMismatch = (byte[])CapturedBody.Clone();
-            duplicateBoxSlotMismatch[14] = 0x05;
+            var zeroTargetTemplate = (byte[])CapturedFrames[2].Body.Clone();
+            Array.Clear(zeroTargetTemplate, 0x16, 4);
             Check(
-                "0x03B8 request rejects duplicate box slot mismatch",
-                !InventoryHandler.TryParseEmblemCollectBody(duplicateBoxSlotMismatch, out _),
+                "0x03B8 request rejects a zero target template id",
+                !InventoryHandler.TryParseEmblemCollectBody(zeroTargetTemplate, out _),
+                ref failures);
+        }
+
+        private static void VerifyResponseBodies(ref int failures)
+        {
+            // 客户端处理器 VA 0x125A9F0 读满 8 字节：u32 status + u32 返还的徽章模板 id。
+            // 客户端派发器先吃掉 body 的第 1 字节（作为处理器的 arg2），handler 从 body+1 读 8 字节。
+            var okAck = InventoryHandler.BuildEmblemCollectAck(125000);
+            Check(
+                "success ack is 9 bytes: dispatcher arg + status 0 + returned emblem template id",
+                okAck.Length == 9
+                && okAck[0] != 0
+                && BitConverter.ToUInt32(okAck, 1) == 0
+                && BitConverter.ToUInt32(okAck, 5) == 125000,
                 ref failures);
 
-            var duplicateTargetSlotMismatch = (byte[])CapturedBody.Clone();
-            duplicateTargetSlotMismatch[20] = 0x0A;
+            var errorAck = InventoryHandler.BuildEmblemCollectError(4, 125000);
             Check(
-                "0x03B8 request rejects duplicate target slot mismatch",
-                !InventoryHandler.TryParseEmblemCollectBody(duplicateTargetSlotMismatch, out _),
+                "error ack is 9 bytes: dispatcher arg + status + a valid item id",
+                errorAck.Length == 9
+                && errorAck[0] != 0
+                && BitConverter.ToUInt32(errorAck, 1) == 4
+                && BitConverter.ToUInt32(errorAck, 5) == 125000,
+                ref failures);
+
+            var windowReset = InventoryHandler.BuildEmblemCollectWindowReset();
+            Check(
+                "window reset ack is 9 bytes: status 0 + returned id -1 (reset without item display)",
+                windowReset.Length == 9
+                && windowReset[0] != 0
+                && BitConverter.ToUInt32(windowReset, 1) == 0
+                && BitConverter.ToUInt32(windowReset, 5) == 0xFFFFFFFF,
+                ref failures);
+
+            // 客户端在"命令数据没读全"时发 OVERFLOW_INFO (count=1, type)，实测失败回包后必发 01-B8-03。
+            Check(
+                "overflow report 01-B8-03 is routed to the emblem collect resend path",
+                InventoryHandler.IsEmblemCollectOverflowInfo(new byte[] { 0x01, 0xB8, 0x03 })
+                && !InventoryHandler.IsEmblemCollectOverflowInfo(new byte[] { 0x01, 0x1B, 0x00 })
+                && !InventoryHandler.IsEmblemCollectOverflowInfo(new byte[] { 0x01, 0xB8 })
+                && !InventoryHandler.IsEmblemCollectOverflowInfo(null),
                 ref failures);
         }
 
@@ -314,6 +379,22 @@ namespace DfoServer.SelfTests
                 && platinumOnBrilliant.GetItem(InventoryListType.Main, EquipmentSlot)?.EmblemId1 == BrilliantEmblemId1,
                 ref failures);
 
+            // 两孔装备只镶 1 颗（等级与箱子匹配）也必须拒绝：客户端补丁跳过了"每个孔都要有徽章"，
+            // 服务端必须自己保证；单孔装备（白金徽章的辅助装备/魔法石）仍允许 1 颗。
+            var halfSocketed = CreateCollectInventory(BrilliantBoxItemId, BrilliantEmblemId1, 0);
+            Check(
+                "two-socket equipment with only one matching emblem is rejected",
+                !InventoryEquipmentMutationService.TryCollectEquipmentEmblems(
+                    halfSocketed,
+                    BoxSlot,
+                    BrilliantBoxItemId,
+                    EquipmentSlot,
+                    EquipmentItemId,
+                    out _)
+                && halfSocketed.GetItem(InventoryListType.Main, BoxSlot)?.Count == 1
+                && halfSocketed.GetItem(InventoryListType.Main, EquipmentSlot)?.EmblemId1 == BrilliantEmblemId1,
+                ref failures);
+
             var emptyBoxSlot = CreateCollectInventory(0, BrilliantEmblemId1, BrilliantEmblemId2);
             Check(
                 "missing box in the declared slot is rejected",
@@ -338,11 +419,11 @@ namespace DfoServer.SelfTests
                     out _),
                 ref failures);
 
-            var wrongTargetUid = CreateCollectInventory(BrilliantBoxItemId, BrilliantEmblemId1, BrilliantEmblemId2);
+            var wrongTargetTemplate = CreateCollectInventory(BrilliantBoxItemId, BrilliantEmblemId1, BrilliantEmblemId2);
             Check(
-                "target uid mismatch is rejected",
+                "target template mismatch is rejected",
                 !InventoryEquipmentMutationService.TryCollectEquipmentEmblems(
-                    wrongTargetUid,
+                    wrongTargetTemplate,
                     BoxSlot,
                     BrilliantBoxItemId,
                     EquipmentSlot,
@@ -364,6 +445,49 @@ namespace DfoServer.SelfTests
                 && fullBackpack.GetItem(InventoryListType.Main, BoxSlot)?.Count == 1
                 && fullBackpack.GetItem(InventoryListType.Main, EquipmentSlot)?.EmblemId1 == BrilliantEmblemId1
                 && fullBackpack.GetItem(InventoryListType.Main, EquipmentSlot)?.EmblemId2 == BrilliantEmblemId2,
+                ref failures);
+
+            // 拒绝原因 → 客户端 status: 4=未镶满, 2=两颗徽章等级不同, 1=等级都不符合箱子参数集合。
+            var notFilled = CreateCollectInventory(BrilliantBoxItemId, BrilliantEmblemId1, 0);
+            Check(
+                "a two-socket equipment with one matching emblem reports failure status 4",
+                !InventoryEquipmentMutationService.TryCollectEquipmentEmblems(
+                    notFilled,
+                    BoxSlot,
+                    BrilliantBoxItemId,
+                    EquipmentSlot,
+                    EquipmentItemId,
+                    out _,
+                    out var notFilledStatus)
+                && notFilledStatus == InventoryEquipmentMutationService.EmblemCollectFailureNotFilled,
+                ref failures);
+
+            var gradeMismatchPair = CreateCollectInventory(BrilliantBoxItemId, BrilliantEmblemId1, GorgeousEmblemId1);
+            Check(
+                "a grade-3 box with a grade-3 and a grade-2 emblem reports failure status 2",
+                !InventoryEquipmentMutationService.TryCollectEquipmentEmblems(
+                    gradeMismatchPair,
+                    BoxSlot,
+                    BrilliantBoxItemId,
+                    EquipmentSlot,
+                    EquipmentItemId,
+                    out _,
+                    out var gradeMismatchStatus)
+                && gradeMismatchStatus == InventoryEquipmentMutationService.EmblemCollectFailureGradeMismatch,
+                ref failures);
+
+            var wrongGrades = CreateCollectInventory(BrilliantBoxItemId, GorgeousEmblemId1, GorgeousEmblemId2);
+            Check(
+                "a grade-3 box with two grade-2 emblems reports failure status 1",
+                !InventoryEquipmentMutationService.TryCollectEquipmentEmblems(
+                    wrongGrades,
+                    BoxSlot,
+                    BrilliantBoxItemId,
+                    EquipmentSlot,
+                    EquipmentItemId,
+                    out _,
+                    out var wrongGradesStatus)
+                && wrongGradesStatus == InventoryEquipmentMutationService.EmblemCollectFailureNotCollectable,
                 ref failures);
         }
 

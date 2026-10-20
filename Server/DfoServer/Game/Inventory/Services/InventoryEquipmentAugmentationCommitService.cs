@@ -52,14 +52,18 @@ namespace DfoServer.Game.Inventory
             return applied && committed;
         }
 
-        internal static bool TryCommitEmblemCollect(InventoryLease lease, short boxSlot, int boxItemId, short targetSlot, int targetUid, out EquipmentEmblemCollectResult result, out bool persistenceFailed)
+        internal static bool TryCommitEmblemCollect(InventoryLease lease, short boxSlot, int boxItemId, short targetSlot, int targetUid, out EquipmentEmblemCollectResult result, out uint failureStatus, out bool persistenceFailed)
         {
             result = null;
+            failureStatus = 0;
             persistenceFailed = false;
             var applied = false;
             EquipmentEmblemCollectResult value = null;
-            var committed = TryCommit(lease, "emblem-collect-item", () => applied = InventoryEquipmentMutationService.TryCollectEquipmentEmblems(lease.Inventory, boxSlot, boxItemId, targetSlot, targetUid, out value));
+            // out 参数不能进 lambda, 故先用局部变量接住业务层报的拒绝原因再转出。
+            var failure = 0u;
+            var committed = TryCommit(lease, "emblem-collect-item", () => applied = InventoryEquipmentMutationService.TryCollectEquipmentEmblems(lease.Inventory, boxSlot, boxItemId, targetSlot, targetUid, out value, out failure));
             result = value;
+            failureStatus = failure;
             persistenceFailed = applied && !committed;
             return applied && committed;
         }

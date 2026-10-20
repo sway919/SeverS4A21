@@ -463,6 +463,8 @@ namespace DfoServer.Network
             {
                 if (await _raidHandler.TryHandleCreatePopupClose(s, h, b))
                     return;
+                if (await _inventoryHandler.TryHandleEmblemCollectOverflowInfo(s, b))
+                    return;
                 await _lotteryItemHandler.HandleOverflowInfo(s, h, b);
             };
         }
